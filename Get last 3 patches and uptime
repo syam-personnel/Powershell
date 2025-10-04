@@ -1,0 +1,60 @@
+# File: Get-SystemPatchInfo.ps1
+
+# Define input and output files
+$computerListFile = "C:\temp\machines.txt"
+$outputCsvFile = "C:\temp\SystemPatchReport.csv"
+
+# Store results
+$results = @()
+
+# Get current date/time
+$currentDate = Get-Date
+
+# Read computer names from file
+$computers = Get-Content -Path $computerListFile
+
+foreach ($computer in $computers) {
+    Write-Host "Processing $computer..."
+
+    try {
+        # Get last boot time
+        $os = Get-WmiObject -Class Win32_OperatingSystem -ComputerName $computer -ErrorAction Stop
+        $lastBoot = $os.LastBootUpTime
+        $bootTime = [System.Management.ManagementDateTimeConverter]::ToDateTime($lastBoot)
+        $uptime = ($currentDate - $bootTime).ToString("dd\.hh\:mm\:ss")
+
+        # Get last 3 installed hotfixes
+        $hotfixes = Get-HotFix -ComputerName $computer -ErrorAction Stop |
+                    Sort-Object -Property InstalledOn -Descending |
+                    Select-Object -First 3
+
+        # If fewer than 3 hotfixes are found, pad with empty values
+        for ($i = 0; $i -lt 3; $i++) {
+            $patch = $hotfixes[$i]
+            $result = [PSCustomObject]@{
+                ComputerName     = $computer
+                LastBootTime     = $bootTime
+                Uptime           = $uptime
+                PatchNumber      = $i + 1
+                HotFixID         = if ($patch) { $patch.HotFixID } else { "" }
+                InstalledOn      = if ($patch) { $patch.InstalledOn } else { "" }
+            }
+            $results += $result
+        }
+
+    } catch {
+        Write-Warning "Failed to process $computer. Error: $_"
+        $results += [PSCustomObject]@{
+            ComputerName     = $computer
+            LastBootTime     = "Error"
+            Uptime           = "Error"
+            PatchNumber      = ""
+            HotFixID         = "Error"
+            InstalledOn      = ""
+        }
+    }
+}
+
+# Export to CSV
+$results | Export-Csv -Path $outputCsvFile -NoTypeInformation -Force
+Write-Host "Report saved to $outputCsvFile"
