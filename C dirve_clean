@@ -1,0 +1,228 @@
+﻿# *********************************************************************************************
+# * This Script deletes the following items from C drive.                                     *
+# *                                                                                           *
+# *     1. Clear Recycle Bin.                                                                 *
+# *     2. Remove downloads in SoftwareDistribution.                                          *
+# *     3. Clear user temp on C drive.                                                        *
+# *     4. Remove INetCache files from all user profiles.                                     *
+# *     5. Remove Packagecache.                                                               *
+# *     6. Remove patch cache.                                                                *
+# *     7. Remove CBS logs older than 3 days.                                                 *
+# *     8. Remove ccmcache files older than 7 days.                                           *
+# *     9. Clear IIS logs older than 90 days.                                                 *
+# *    10. Remove memorydump and minidump older than 30days.                                  *
+# *    11. Remove windows.old folder.  
+#*         Delete C:\$Recyclebin                                                              *
+# *    12. Delete account unknown profiles( only deletes profile not available on AD).        *
+# *    13. Run Disk Cleanup.                                                                  *
+# *                                                                                           * 
+# *                                                                                           *
+# *                                                                                           * 
+# *      Prerequisites: To run this script C drive free space must be below 10GB              *
+# *                                                                                           *
+# *      Version: 2.0                                                                         *
+# *      Modified on : 13-sep-2025                                                            *
+# *                                                                                           *
+# *********************************************************************************************
+
+
+
+# Check available space on C: drive
+$drive = Get-PSDrive -Name C
+
+# Set threshold to 10GB
+$threshold = 10 * 1GB
+
+
+# If available space is less than threshold, run cleanup
+if ($drive.Free -lt $threshold) {
+    Write-Host "Available space on C: is less than 10GB. Running disk cleanup..."
+
+    #----------------------------
+    # 1. Clear Recycle Bin
+    #----------------------------
+
+    Clear-RecycleBin -DriveLetter "C" -Confirm:$false
+
+    Write-Host " Recyclebin Cleared " -ForegroundColor Green
+
+    # ----------------------------------------------
+    # 2. Remove downloads in SoftwareDistribution
+    # ----------------------------------------------
+
+    Remove-Item -Path "C:\Windows\SoftwareDistribution\Download\*" -Force -Recurse -ErrorAction SilentlyContinue
+
+    Write-Host " Downloads on Softwaredistribution Cleared " -ForegroundColor Green 
+
+    
+    # -------------------------------------
+    # 3. Clear user temp on C drive
+    # -------------------------------------
+
+    $cutoff = (Get-Date).AddDays(-2)
+
+    Get-ChildItem "C:\Users\*\AppData\Local\Temp" -Recurse -Force | Where-Object { $_.LastWriteTime -lt $cutoff } | Remove-Item -Recurse -Force -ErrorAction SilentlyContinue
+
+    # --------------------------------------------------
+    # 4. Remove INetCache files from all user profiles
+    # ---------------------------------------------------
+
+    Get-ChildItem "C:\Users" -Directory | ForEach-Object {
+        $cachePath = "$($_.FullName)\AppData\Local\Microsoft\Windows\INetCache\*"
+        if (Test-Path $cachePath) {
+            Get-ChildItem -Path $cachePath -Recurse -ErrorAction Ignore | Remove-Item -Force -ErrorAction SilentlyContinue
+        }
+    }
+
+    # -----------------------------
+    # 5. Remove Packagecache
+    # -----------------------------
+
+    Remove-Item -Path "C:\ProgramData\Package Cache\*" -Force -Recurse -ErrorAction SilentlyContinue
+
+    # ------------------------------
+    # 6. Remove patch cache files
+    # -------------------------------
+
+    $patchCachePath = 'C:\Windows\Installer\$PatchCache$\Managed'
+    if (Test-Path $patchCachePath) {
+        Remove-Item -Path "$patchCachePath\*" -Force -Recurse -ErrorAction SilentlyContinue
+    }
+
+    #-------------------------------------
+    # 7. Remove CBS logs older than 3 days
+    # --------------------------------------
+
+    #  Define date for old logs
+
+      $oldlogs = (Get-Date).AddDays(-3)
+      Get-ChildItem -Path "C:\Windows\Logs\CBS" | Where-Object { $_.LastWriteTime -lt $oldlogs } | Remove-Item -Force -Recurse -ErrorAction SilentlyContinue
+
+    #------------------------------------------------
+    # 8. Remove ccmcache files older than 7 days
+    #-------------------------------------------------
+
+    $oldCache = (Get-Date).AddDays(-7)
+    Get-ChildItem -Path "C:\Windows\ccmcache" | Where-Object { $_.LastWriteTime -lt $oldCache } | Remove-Item -Force -Recurse -ErrorAction SilentlyContinue
+
+    #---------------------------------------------
+    # 9. Clear IIS logs older than 90 days
+    # ---------------------------------------------
+
+    $logPath = "C:\inetpub\logs\LogFiles\W3SVC1"
+    $cutoffDate = (Get-Date).AddDays(-90)
+    if (Test-Path $logPath -PathType Container) {
+        Get-ChildItem -Path $logPath -File | Where-Object { $_.LastWriteTime -lt $cutoffDate } | Remove-Item -Force -ErrorAction SilentlyContinue
+        Write-Output "Cleared IIS logs older than 90 days successfully."
+    } else {
+        Write-Output "Inetpub logs not found at $logPath."
+    }
+
+    #------------------------------------------------------
+    # 10. Remove memorydump and minidump olderthan 30days
+    #------------------------------------------------------
+
+    # Define the age threshold
+    $dumpolderthan = (Get-Date).AddDays(-30)
+
+    # Check and remove the main memory dump file if it exists
+
+    if (Test-Path "C:\Windows\Memory.dmp") {
+    $file = Get-Item "C:\Windows\Memory.dmp"
+    if ($file.LastWriteTime -lt $dumpolderthan) {
+        Remove-Item $file.FullName -Force
+        Write-Output "Deleted: $($file.FullName)"
+      }
+
+      }
+
+     # Remove minidump files older than 30 days
+
+     Get-ChildItem "C:\Windows\Minidump\" -Recurse -File | Where-Object {
+      $_.LastWriteTime -lt $dumpolderthan } | ForEach-Object { Remove-Item $_.FullName -Force | Write-Output "Deleted: $($_.FullName)" }
+      
+
+
+    #--------------------------------------------------
+    # 11.  Remove windows.old folder
+    #--------------------------------------------------
+
+    if (Test-Path "C:\Windows.old") {
+    Write-Output "Removing Windows.old..."
+    takeown /F "C:\Windows.old" /R /D Y | Out-Null
+    icacls "C:\Windows.old" /grant administrators:F /T | Out-Null
+    Remove-Item "C:\Windows.old" -Recurse -Force
+   }
+
+   #---------------------------------------------
+   # 12. DeleteC:\$RECYCLE.BIN
+   #----------------------------------------------
+
+   $recyclebinPath = 'C:\$RECYCLE.BIN'
+    if (Test-Path $recyclebinPath) {
+        Remove-Item -Path "$patchCachePath\*" -Force -Recurse -ErrorAction SilentlyContinue
+    }
+
+
+   #------------------------------------------------------------------------
+   # 13. Delete accoununknown profiles.
+   # Note: This only delets the profiles that users not available on AD
+   #-------------------------------------------------------------------------
+
+    # Get all user profiles
+    $profiles = Get-WmiObject Win32_UserProfile | Where-Object {
+    $_.Special -eq $false -and $_.LocalPath -ne $null
+    }
+
+    foreach ($profile in $profiles) {
+    try {
+        $sid = New-Object System.Security.Principal.SecurityIdentifier($profile.SID)
+        $account = $sid.Translate([System.Security.Principal.NTAccount])
+    } catch {
+        # If it throws an error, it's likely Account Unknown (SID not resolvable)
+        Write-Host "Deleting orphaned profile: $($profile.LocalPath)"
+        $profile.Delete()
+    }
+    }
+    
+    #-----------------------------------------------
+    # 14a. Registry path for cleanmgr settings
+    #-----------------------------------------------
+ 
+   $regBasePath = "HKLM:\SOFTWARE\Microsoft\Windows\CurrentVersion\Explorer\VolumeCaches"
+ 
+    # List of cleanup items to enable
+    $cleanupItems = @(
+     "Update Cleanup",
+     "Temporary Setup Files",
+     "Temporary Files",
+     "Downloaded Program Files",
+     "System archived Windows Error Reporting",
+     "Delivery Optimization Files",
+     "Previous Installations"
+    )
+    
+     # Enable each selected item for sageset:1 (StateFlags0001 = 2 means "selected")
+   
+       foreach ($item in $cleanupItems) {
+       $keyPath = Join-Path $regBasePath $item
+        if (Test-Path $keyPath) {
+        Set-ItemProperty -Path $keyPath -Name "StateFlags" -Value 1 -Force
+        Set-ItemProperty -Path $keyPath -Name "StateFlags001" -Value 2 -Force
+      }
+    }
+     Write-Host "Cleanmgr options successfully configured for /sagerun:1" -BackgroundColor Yellow
+
+    
+    #------------------------------------------------------------------------------------------------------------
+    # 14. Run Disk Cleanup (requires prior configuration with /sageset:1. Those settings are made from 14a)
+    #------------------------------------------------------------------------------------------------------------
+
+    $cleanupArgs = "/sagerun:1"
+    Start-Process "cleanmgr.exe" -ArgumentList $cleanupArgs -Wait
+  
+}
+else {
+    Write-Host "Sufficient space available on C: drive." -ForegroundColor Cyan
+}
+ exit
