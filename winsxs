@@ -1,1 +1,30 @@
 
+Write-Header "DISM WinSxS Component Store Cleanup"
+
+# Step 1: Analyze
+Write-Step "Analyzing component store (this may take a few minutes)..."
+$analyzeResult = & dism.exe /Online /Cleanup-Image /AnalyzeComponentStore 2>&1
+$analyzeResult | ForEach-Object { Write-Host "    $_" -ForegroundColor DarkGray }
+
+# Step 2: Check if cleanup is recommended
+$recommended = $analyzeResult | Where-Object { $_ -match "Component Store Cleanup Recommended\s*:\s*Yes" }
+
+if (-not $recommended -and $Action -eq "WhatIf") {
+    Write-Host ""
+    Write-Host "  DISM reports cleanup is not recommended at this time." -ForegroundColor Green
+    return
+}
+
+# Step 3: Run cleanup
+Write-Step "Running StartComponentCleanup (removes superseded components)..."
+$cleanResult = & dism.exe /Online /Cleanup-Image /StartComponentCleanup /ResetBase 2>&1
+$cleanResult | ForEach-Object { Write-Host "    $_" -ForegroundColor DarkGray }
+
+if ($LASTEXITCODE -eq 0) {
+    Write-Host ""
+    Write-Host "  DISM cleanup completed successfully." -ForegroundColor Green
+}
+else {
+    Write-Host ""
+    Write-Host "  DISM cleanup exited with code $LASTEXITCODE. Review output above." -ForegroundColor Red
+}
