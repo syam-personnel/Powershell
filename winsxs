@@ -1,30 +1,158 @@
+#Requires -RunAsAdministrator
+$ErrorActionPreference = "Continue"
 
-Write-Header "DISM WinSxS Component Store Cleanup"
+# ── Banner ────────────────────────────────────────────────────────────────────
+Clear-Host
+Write-Host "==================================================================" -ForegroundColor Cyan
+Write-Host "   PATCH CLEANER  |  Windows Installer Cache Cleaner"              -ForegroundColor Cyan
+Write-Host "   $(Get-Date -Format 'yyyy-MM-dd HH:mm')"                         -ForegroundColor DarkGray
+Write-Host "==================================================================" -ForegroundColor Cyan
 
-# Step 1: Analyze
-Write-Step "Analyzing component store (this may take a few minutes)..."
-$analyzeResult = & dism.exe /Online /Cleanup-Image /AnalyzeComponentStore 2>&1
-$analyzeResult | ForEach-Object { Write-Host "    $_" -ForegroundColor DarkGray }
+$drive = Get-PSDrive -Name ($env:SystemRoot[0]) -EA SilentlyContinue
+Write-Host "`n  Drive $($env:SystemRoot[0]):  Free: $([math]::Round($drive.Free/1GB,2)) GB  /  Used: $([math]::Round($drive.Used/1GB,2)) GB`n" -ForegroundColor Gray
 
-# Step 2: Check if cleanup is recommended
-$recommended = $analyzeResult | Where-Object { $_ -match "Component Store Cleanup Recommended\s*:\s*Yes" }
+# ── Menu ──────────────────────────────────────────────────────────────────────
+Write-Host "  [1]  Scan only  - report orphaned files, no changes" -ForegroundColor Green
+Write-Host "  [2]  Move       - move orphaned files to a backup folder"  -ForegroundColor Yellow
+Write-Host "  [3]  Delete     - permanently delete orphaned files"        -ForegroundColor Red
+Write-Host "  [Q]  Quit`n"                                                -ForegroundColor DarkGray
 
-if (-not $recommended -and $Action -eq "WhatIf") {
-    Write-Host ""
-    Write-Host "  DISM reports cleanup is not recommended at this time." -ForegroundColor Green
-    return
+do { $choice = (Read-Host "  Choice [1/2/3/Q]").Trim().ToUpper() } while ($choice -notin '1','2','3','Q')
+if ($choice -eq 'Q') { Write-Host "`n  Bye.`n"; exit }
+
+$action = @{ '1'='WhatIf'; '2'='Move'; '3'='Delete' }[$choice]
+
+$backupPath = "C:\PatchCleaner_Backup"
+if ($action -eq 'Move') {
+    $in = (Read-Host "  Backup folder [Enter = $backupPath]").Trim()
+    if ($in) { $backupPath = $in }
+    if (-not (Test-Path $backupPath)) { New-Item -ItemType Directory -Path $backupPath -Force | Out-Null }
 }
 
-# Step 3: Run cleanup
-Write-Step "Running StartComponentCleanup (removes superseded components)..."
-$cleanResult = & dism.exe /Online /Cleanup-Image /StartComponentCleanup /ResetBase 2>&1
-$cleanResult | ForEach-Object { Write-Host "    $_" -ForegroundColor DarkGray }
+if ($action -eq 'Delete') {
+    Write-Host "`n  !! Files will be PERMANENTLY deleted. Ensure you have a backup. !!" -ForegroundColor Red
+    if ((Read-Host "  Type YES to confirm").Trim() -ne 'YES') { Write-Host "  Aborted.`n" -ForegroundColor Yellow; exit }
+}
 
-if ($LASTEXITCODE -eq 0) {
-    Write-Host ""
-    Write-Host "  DISM cleanup completed successfully." -ForegroundColor Green
+# ── Add Windows Installer type definitions ────────────────────────────────────
+# We use MsiEnumProducts / MsiEnumPatches via P/Invoke for the most accurate
+# picture — the same Win32 API that PatchCleaner v1.4 uses internally.
+$sig = @'
+[DllImport("msi.dll", CharSet=CharSet.Unicode)]
+public static extern uint MsiEnumProducts(uint index, System.Text.StringBuilder productCode);
+
+[DllImport("msi.dll", CharSet=CharSet.Unicode)]
+public static extern uint MsiEnumPatches(string productCode, uint patchIndex,
+    System.Text.StringBuilder patchCode, System.Text.StringBuilder transforms,
+    ref uint transformsBufSize);
+
+[DllImport("msi.dll", CharSet=CharSet.Unicode)]
+public static extern uint MsiGetProductInfo(string productCode, string property,
+    System.Text.StringBuilder value, ref uint size);
+
+[DllImport("msi.dll", CharSet=CharSet.Unicode)]
+public static extern uint MsiGetPatchInfo(string patchCode, string property,
+    System.Text.StringBuilder value, ref uint size);
+'@
+
+Add-Type -MemberDefinition $sig -Name MSI -Namespace WinAPI -ErrorAction Stop
+
+# ── Enumerate all installed products and their cached .msi/.msp paths ─────────
+Write-Host "`n  Enumerating installed products via Windows Installer API..." -ForegroundColor Yellow
+
+$needed = [System.Collections.Generic.HashSet[string]]::new([System.StringComparer]::OrdinalIgnoreCase)
+
+$productBuf = New-Object System.Text.StringBuilder 39   # GUID = 38 chars + null
+$index = 0
+
+while ([WinAPI.MSI]::MsiEnumProducts($index, $productBuf) -eq 0) {
+    $productCode = $productBuf.ToString()
+
+    # Get the cached .msi path for this product
+    $valBuf  = New-Object System.Text.StringBuilder 512
+    $valSize = [uint32]512
+    if ([WinAPI.MSI]::MsiGetProductInfo($productCode, "LocalPackage", $valBuf, [ref]$valSize) -eq 0) {
+        $f = $valBuf.ToString()
+        if ($f) { $needed.Add([IO.Path]::GetFileName($f)) | Out-Null }
+    }
+
+    # Enumerate all patches applied to this product
+    $patchBuf      = New-Object System.Text.StringBuilder 39
+    $transformsBuf = New-Object System.Text.StringBuilder 512
+    $patchIndex    = 0
+
+    while ($true) {
+        $tSize = [uint32]512
+        $ret   = [WinAPI.MSI]::MsiEnumPatches($productCode, $patchIndex, $patchBuf, $transformsBuf, [ref]$tSize)
+        if ($ret -ne 0) { break }
+
+        $patchCode = $patchBuf.ToString()
+        $pValBuf   = New-Object System.Text.StringBuilder 512
+        $pValSize  = [uint32]512
+        if ([WinAPI.MSI]::MsiGetPatchInfo($patchCode, "LocalPackage", $pValBuf, [ref]$pValSize) -eq 0) {
+            $f = $pValBuf.ToString()
+            if ($f) { $needed.Add([IO.Path]::GetFileName($f)) | Out-Null }
+        }
+        $patchIndex++
+    }
+
+    $index++
 }
-else {
+
+Write-Host "  Products scanned. References collected: $($needed.Count)" -ForegroundColor DarkGray
+
+# ── Scan Installer folder — ONLY .msi and .msp files are ever orphans ─────────
+Write-Host "  Scanning $env:windir\Installer..." -ForegroundColor Yellow
+
+$installerDir = "$env:windir\Installer"
+$allFiles  = @(Get-ChildItem $installerDir -File -EA SilentlyContinue | Where-Object { $_.Extension -in '.msi','.msp' })
+$orphans   = @($allFiles | Where-Object { -not $needed.Contains($_.Name) })
+$totalSize = ($orphans | Measure-Object Length -Sum).Sum
+
+Write-Host "`n  .msi/.msp files : $($allFiles.Count)"
+Write-Host "  Still in use    : $($needed.Count)" -ForegroundColor Green
+Write-Host "  Orphaned        : $($orphans.Count)  ($([math]::Round($totalSize/1MB,2)) MB reclaimable)" -ForegroundColor $(if ($orphans.Count) { 'Magenta' } else { 'Green' })
+
+if ($orphans.Count -eq 0) {
+    Write-Host "`n  No orphaned installer files found.`n" -ForegroundColor Green
+} else {
     Write-Host ""
-    Write-Host "  DISM cleanup exited with code $LASTEXITCODE. Review output above." -ForegroundColor Red
+    $orphans | ForEach-Object {
+        Write-Host ("  {0,-45} {1,8} MB  {2}" -f $_.Name, [math]::Round($_.Length/1MB,2), $_.LastWriteTime.ToString("yyyy-MM-dd")) -ForegroundColor Gray
+    }
+    Write-Host ""
+
+    if ($action -eq 'Move') {
+        $orphans | ForEach-Object {
+            try   { Move-Item $_.FullName (Join-Path $backupPath $_.Name) -Force; Write-Host "  Moved  : $($_.Name)" -ForegroundColor Green }
+            catch { Write-Host "  FAILED : $($_.Name) — $_" -ForegroundColor Red }
+        }
+        Write-Host "`n  $($orphans.Count) file(s) moved to $backupPath" -ForegroundColor Green
+    } elseif ($action -eq 'Delete') {
+        $orphans | ForEach-Object {
+            try   { Remove-Item $_.FullName -Force; Write-Host "  Deleted: $($_.Name)" -ForegroundColor Green }
+            catch { Write-Host "  FAILED : $($_.Name) — $_" -ForegroundColor Red }
+        }
+        Write-Host "`n  $($orphans.Count) file(s) deleted." -ForegroundColor Green
+    } else {
+        Write-Host "  [Scan only] No files changed. Re-run and choose Move or Delete to clean up." -ForegroundColor Yellow
+    }
 }
+
+# ── DISM WinSxS cleanup ───────────────────────────────────────────────────────
+Write-Host ""
+if ((Read-Host "  Run DISM WinSxS component cleanup? [Y/N]").Trim().ToUpper() -eq 'Y') {
+    Write-Host "  Analyzing component store..." -ForegroundColor Yellow
+    & dism.exe /Online /Cleanup-Image /AnalyzeComponentStore 2>&1 | ForEach-Object { Write-Host "    $_" -ForegroundColor DarkGray }
+    if ($action -ne 'WhatIf') {
+        Write-Host "  Running cleanup (this may take several minutes)..." -ForegroundColor Yellow
+        & dism.exe /Online /Cleanup-Image /StartComponentCleanup /ResetBase 2>&1 | ForEach-Object { Write-Host "    $_" -ForegroundColor DarkGray }
+    } else {
+        Write-Host "  [Scan only] DISM cleanup skipped." -ForegroundColor Yellow
+    }
+}
+
+# ── Done ──────────────────────────────────────────────────────────────────────
+$drive = Get-PSDrive -Name ($env:SystemRoot[0]) -EA SilentlyContinue
+Write-Host " Done  |  Free now: $([math]::Round($drive.Free/1GB,2)) GB`n" -ForegroundColor Cyan
+Read-Host "  Press ENTER to exit"
