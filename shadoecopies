@@ -1,0 +1,151 @@
+# Remove Shadow Copies Older Than 24 Hours
+# Requires: Administrator privileges
+# Usage: Run as Administrator in PowerShell
+
+# Check for admin privileges
+$isAdmin = [Security.Principal.WindowsIdentity]::GetCurrent().Groups -contains [Security.Principal.SecurityIdentifier]::new('S-1-5-32-544')
+if (-not $isAdmin) {
+    Write-Host "ERROR: This script requires Administrator privileges. Please run PowerShell as Administrator." -ForegroundColor Red
+    exit 1
+}
+
+$HoursOld = 24
+
+
+Write-Host " "
+Write-Host "============================================================== " -ForegroundColor Cyan
+Write-Host " "
+Write-Host "           Shadow Copy Removal Script" -ForegroundColor Cyan
+Write-Host " "
+Write-Host "=============================================================== " -ForegroundColor Cyan
+Write-Host " "
+Write-Host "Removing shadow copies older than $HoursOld hours..." -ForegroundColor Yellow
+
+# Calculate cutoff time
+
+$cutoffTime = (Get-Date).AddHours(-$HoursOld)
+
+Write-Host " "
+Write-Host "Cutoff date/time: $($cutoffTime.ToString('yyyy-MM-dd HH:mm:ss'))`n"
+Write-Host " "
+
+try {
+    # Get all shadow copies
+    Write-Host "Retrieving shadow copies..." -ForegroundColor Cyan
+    $shadowCopies = Get-WmiObject Win32_ShadowCopy -ErrorAction Stop
+    
+    if ($null -eq $shadowCopies) {
+        Write-Host "No shadow copies found on this system." -ForegroundColor Yellow
+        exit 0
+    }
+    
+    # Convert to array if single result
+    if ($shadowCopies -is [System.Management.ManagementObject]) {
+        $shadowCopies = @($shadowCopies)
+    }
+    
+    Write-Host "Found $($shadowCopies.Count) total shadow copy(ies).`n"
+    
+    # Filter shadow copies older than threshold
+    $oldCopies = @()
+    
+    # Get drive mapping
+    $volumes = Get-Volume
+    
+    foreach ($copy in $shadowCopies) {
+        $creationTime = [System.Management.ManagementDateTimeConverter]::ToDateTime($copy.InstallDate)
+        $age = (Get-Date) - $creationTime
+        
+        if ($creationTime -lt $cutoffTime) {
+            # Find corresponding drive letter
+            $driveLetter = "Unknown"
+            $volumeName = $copy.VolumeName
+            
+            foreach ($vol in $volumes) {
+                if ($vol.UniqueId -eq $volumeName) {
+                    $driveLetter = $vol.DriveLetter
+                    break
+                }
+            }
+            
+            $oldCopies += @{
+                ID = $copy.ID
+                DriveLetter = $driveLetter
+                Volume = $volumeName
+                Created = $creationTime
+                AgeHours = [Math]::Round($age.TotalHours, 1)
+                Size = $copy.UsedSpace
+            }
+        }
+    }
+    
+    if ($oldCopies.Count -eq 0) {
+        Write-Host "No shadow copies older than $HoursOld hours found." -ForegroundColor Green
+        exit 0
+    }
+    
+    # Display shadow copies to be removed
+    Write-Host "Shadow copies to remove ($($oldCopies.Count)): " -ForegroundColor Yellow
+    $oldCopies | ForEach-Object {
+        Write-Host " "
+        Write-Host "  Drive Letter: $($_.DriveLetter)" -ForegroundColor Cyan
+        Write-Host "  ID: $($_.ID)"
+        Write-Host "  Volume: $($_.Volume)"
+        Write-Host "  Created: $($_.Created.ToString('yyyy-MM-dd HH:mm:ss'))"
+        Write-Host "  Age: $($_.AgeHours) hours"
+        Write-Host "  Size: $($_.Size) bytes"
+        Write-Host ""
+    }
+    
+    # Confirm deletion
+    Write-Host "WARNING: This will permanently delete the above shadow copies." -ForegroundColor Red
+    $confirmation = Read-Host "Do you want to proceed with deletion? (yes/no)"
+    
+    if ($confirmation -ne 'yes') {
+        Write-Host "Deletion cancelled." -ForegroundColor Yellow
+        exit 0
+    }
+    
+    # Delete shadow copies
+    Write-Host "Removing shadow copies..." -ForegroundColor Cyan
+    $removedCount = 0
+    $errorCount = 0
+    
+    foreach ($copy in $shadowCopies) {
+        $creationTime = [System.Management.ManagementDateTimeConverter]::ToDateTime($copy.InstallDate)
+        
+        if ($creationTime -lt $cutoffTime) {
+            try {
+                Remove-WmiObject -InputObject $copy -ErrorAction Stop
+                $removedCount++
+                Write-Host " "
+                Write-Host "  ✓ Removed: $($copy.ID)" -ForegroundColor Green
+                Write-Host " "
+            }
+            catch {
+                $errorCount++
+                Write-Host " "
+                Write-Host "  ✗ Failed to remove $($copy.ID): $_" -ForegroundColor Red
+                Write-Host " "
+            }
+        }
+    }
+    
+    Write-Host " Results:" -ForegroundColor Cyan
+    Write-Host " "
+    Write-Host "  Successfully removed: $removedCount" -ForegroundColor Green
+    Write-Host " "
+    if ($errorCount -gt 0) {
+        Write-Host "  Errors: $errorCount" -ForegroundColor Red
+    }
+}
+catch {
+    Write-Host "ERROR: $_" -ForegroundColor Red
+    exit 1
+}
+Write-Host " "
+Write-Host "============================================================== " -ForegroundColor Cyan
+Write-Host " "
+Write-Host "              Script completed successfully." -ForegroundColor Green
+Write-Host " "
+Write-Host "============================================================== " -ForegroundColor Cyan
